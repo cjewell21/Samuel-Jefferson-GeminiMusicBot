@@ -11,7 +11,7 @@ const {
     getVoiceConnection,
     demuxProbe,
 } = require('@discordjs/voice');
-const play = require('play-dl');
+const ytdl = require('@distube/ytdl-core'); // Switch to @distube/ytdl-core
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } = require('discord.js');
 const logger = require('../utils/logger');
 const config = require('../config');
@@ -284,108 +284,125 @@ async function playNextTrack(guildId, queues) {
     logger.info(`[${guildId}] Attempting to play: "${queue.currentTrack.title}" (URL: ${queue.currentTrack.url})`);
     await updateNowPlayingMessage(queue);
 
-    try {
-        // Validate URL
-        if (!queue.currentTrack.url || !queue.currentTrack.url.includes('youtube.com')) {
-            logger.error(`[${guildId}] Invalid or non-YouTube URL: ${queue.currentTrack.url}`);
-            throw new Error('Invalid URL: Must be a YouTube video URL.');
-        }
+    const maxRetries = 2;
+    let attempt = 0;
 
-        // Use play.stream() as primary
-        logger.debug(`[${guildId}] Fetching stream using play.stream for: ${queue.currentTrack.url}`);
-        const streamOpts = {
-            discordPlayerCompatibility: true,
-            quality: 2 // Highest audio quality
-        };
-        const streamInfo = await play.stream(queue.currentTrack.url, streamOpts);
+    while (attempt < maxRetries) {
+        attempt++;
+        logger.debug(`[${guildId}] Stream fetch attempt ${attempt} of ${maxRetries}`);
 
-        if (!streamInfo || !streamInfo.stream || !streamInfo.type) {
-            logger.error(`[${guildId}] play.stream failed to return valid stream info. URL: ${queue.currentTrack.url}`);
-            throw new Error('Failed to obtain stream info from play-dl.');
-        }
-        logger.debug(`[${guildId}] Stream obtained via play-dl. Type: ${streamInfo.type}`);
+        try {
+            // Validate URL
+            if (!queue.currentTrack.url || !queue.currentTrack.url.includes('youtube.com')) {
+                logger.error(`[${guildId}] Invalid or non-YouTube URL: ${queue.currentTrack.url}`);
+                throw new Error('Invalid URL: Must be a YouTube video URL.');
+            }
 
-        // Add stream event listeners for debugging
-        streamInfo.stream.on('error', (err) => {
-            logger.error(`[${guildId}] Stream error:`, err);
-        });
-        streamInfo.stream.on('end', () => {
-            logger.debug(`[${guildId}] Stream ended.`);
-        });
-        streamInfo.stream.on('readable', () => {
-            logger.debug(`[${guildId}] Stream is readable. Data available: ${streamInfo.stream.readableLength} bytes`);
-        });
+            // Use @distube/ytdl-core to fetch stream
+            logger.debug(`[${guildId}] Fetching stream using @distube/ytdl-core for: ${queue.currentTrack.url}`);
+            const stream = ytdl(queue.currentTrack.url, {
+                filter: 'audioonly',
+                quality: 'highestaudio',
+                highWaterMark: 1 << 25,
+            });
 
-        // Create audio resource
-        const resource = createAudioResource(streamInfo.stream, {
-            inputType: streamInfo.type,
-            inlineVolume: true,
-            metadata: queue.currentTrack,
-        });
+            if (!stream || stream.readableEnded || stream.errored) {
+                logger.error(`[${guildId}] Failed to obtain a valid stream from @distube/ytdl-core.`);
+                throw new Error('Failed to obtain a valid stream.');
+            }
+            logger.debug(`[${guildId}] Stream obtained via @distube/ytdl-core. Type: Raw`);
 
-        if (!resource.playStream || resource.playStream.readableEnded || resource.playStream.errored) {
-            logger.error(`[${guildId}] Invalid audio resource created.`);
-            throw new Error('Invalid audio resource.');
-        }
-        logger.debug(`[${guildId}] Audio resource created successfully.`);
+            // Add stream event listeners
+            stream.on('error', (err) => {
+                logger.error(`[${guildId}] Stream error:`, err);
+            });
+            stream.on('end', () => {
+                logger.debug(`[${guildId}] Stream ended.`);
+            });
+            stream.on('readable', () => {
+                logger.debug(`[${guildId}] Stream is readable. Data available: ${stream.readableLength} bytes`);
+            });
 
-        resource.volume?.setVolume(queue.volume / 100 || 0.5);
-        logger.debug(`[${guildId}] Volume set to ${queue.volume || 50}%`);
+            // Create audio resource
+            const resource = createAudioResource(stream, {
+                inputType: StreamType.Raw,
+                inlineVolume: true,
+                metadata: queue.currentTrack,
+            });
 
-        // Ensure player is in Idle state
-        if (queue.player.state.status !== AudioPlayerStatus.Idle) {
-            logger.debug(`[${guildId}] Player not idle (${queue.player.state.status}). Stopping before play.`);
-            queue.player.stop(true);
-        }
+            if (!resource.playStream || resource.playStream.readableEnded || resource.playStream.errored) {
+                logger.error(`[${guildId}] Invalid audio resource created.`);
+                throw new Error('Invalid audio resource.');
+            }
+            logger.debug(`[${guildId}] Audio resource created successfully.`);
 
-        // Play resource
-        queue.player.play(resource);
-        logger.info(`[${guildId}] Play command issued for: "${queue.currentTrack.title}".`);
+            resource.volume?.setVolume(queue.volume / 100 || 0.5);
+            logger.debug(`[${guildId}] Volume set to ${queue.volume || 50}%`);
 
-        // Monitor buffering
-        const bufferingTimeout = setTimeout(() => {
-            if (queue.player.state.status === AudioPlayerStatus.Buffering) {
-                logger.warn(`[${guildId}] Player stuck buffering for track "${queue.currentTrack?.title}". Stopping player.`);
+            // Ensure player is in Idle state
+            if (queue.player.state.status !== AudioPlayerStatus.Idle) {
+                logger.debug(`[${guildId}] Player not idle (${queue.player.state.status}). Stopping before play.`);
                 queue.player.stop(true);
-            } else if (queue.player.state.status !== AudioPlayerStatus.Playing) {
-                logger.warn(`[${guildId}] Player in state ${queue.player.state.status} after 15s. Expected Playing.`);
             }
-        }, 15000);
 
-        const clearBufferingTimeout = (oldState, newState) => {
-            if (newState.status === AudioPlayerStatus.Playing || newState.status === AudioPlayerStatus.Idle) {
-                clearTimeout(bufferingTimeout);
-                queue.player.off('stateChange', clearBufferingTimeout);
+            // Play resource
+            queue.player.play(resource);
+            logger.info(`[${guildId}] Play command issued for: "${queue.currentTrack.title}".`);
+
+            // Monitor buffering
+            const bufferingTimeout = setTimeout(() => {
+                if (queue.player.state.status === AudioPlayerStatus.Buffering) {
+                    logger.warn(`[${guildId}] Player stuck buffering for track "${queue.currentTrack?.title}". Stopping player.`);
+                    queue.player.stop(true);
+                } else if (queue.player.state.status !== AudioPlayerStatus.Playing) {
+                    logger.warn(`[${guildId}] Player in state ${queue.player.state.status} after 15s. Expected Playing.`);
+                }
+            }, 15000);
+
+            const clearBufferingTimeout = (oldState, newState) => {
+                if (newState.status === AudioPlayerStatus.Playing || newState.status === AudioPlayerStatus.Idle) {
+                    clearTimeout(bufferingTimeout);
+                    queue.player.off('stateChange', clearBufferingTimeout);
+                }
+            };
+            queue.player.on('stateChange', clearBufferingTimeout);
+
+            return; // Success, exit retry loop
+
+        } catch (error) {
+            logger.error(`[${guildId}] Attempt ${attempt} failed for "${queue.currentTrack?.title || 'unknown'}":`, error);
+            if (attempt < maxRetries) {
+                logger.info(`[${guildId}] Retrying stream fetch...`);
+                continue;
             }
-        };
-        queue.player.on('stateChange', clearBufferingTimeout);
 
-    } catch (error) {
-        logger.error(`[${guildId}] Error during playNextTrack for "${queue.currentTrack?.title || 'unknown'}":`, error);
-        if (queue.textChannel) {
-            let errorMessage = `Failed to play "${queue.currentTrack?.title || 'unknown track'}". Skipping.`;
-            if (error.message.includes('403')) {
-                errorMessage = `${errorMessage} YouTube access restricted (403). Try again later or check bot's network.`;
-                logger.error(`[${guildId}] 403 Forbidden error. Possible YouTube rate limit or IP block.`);
-            } else if (error.message.includes('Invalid URL')) {
-                errorMessage = `${errorMessage} Provided URL is not a valid YouTube URL.`;
+            if (queue.textChannel) {
+                let errorMessage = `Failed to play "${queue.currentTrack?.title || 'unknown track'}". Skipping.`;
+                if (error.message.includes('403')) {
+                    errorMessage = `${errorMessage} YouTube access restricted (403). Try again later or check bot's network.`;
+                    logger.error(`[${guildId}] 403 Forbidden error. Possible YouTube rate limit or IP block.`);
+                } else if (error.message.includes('Invalid URL')) {
+                    errorMessage = `${errorMessage} Provided URL is not a valid YouTube URL.`;
+                } else {
+                    errorMessage = `${errorMessage} Reason: ${error.message}`;
+                }
+                await queue.textChannel.send({ content: errorMessage }).catch(() => {});
+            }
+
+            const failedTrack = queue.currentTrack;
+            queue.currentTrack = null;
+            if (queue.loop && failedTrack) queue.songs.push(failedTrack);
+
+            if (queue.songs.length > 0 || queue.loop) {
+                logger.debug(`[${guildId}] Queue has more songs or loop is enabled. Continuing to next track.`);
+                handleIdleState(queue, queues);
             } else {
-                errorMessage = `${errorMessage} Reason: ${error.message}`;
+                logger.debug(`[${guildId}] No more songs and loop is off. Ending queue.`);
+                handleQueueEnd(queue, queues);
             }
-            await queue.textChannel.send({ content: errorMessage }).catch(() => {});
+        } finally {
+            queue.processingNext = false;
         }
-
-        const failedTrack = queue.currentTrack;
-        queue.currentTrack = null;
-        if (queue.loop && failedTrack) queue.songs.push(failedTrack);
-
-        if (queue.player.state.status !== AudioPlayerStatus.Idle) {
-            queue.player.stop(true);
-        } else {
-            handleIdleState(queue, queues);
-        }
-    } finally {
-        queue.processingNext = false;
     }
 }
 
