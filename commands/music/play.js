@@ -1,22 +1,34 @@
 // commands/music/play.js
 const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
-const { createGuildQueue, addToQueue, startPlayback, updateNowPlayingMessage, playNextTrack } = require('../../spotify/spotifyPlayer'); // Adjust path
-const play = require('play-dl'); // For getting track/playlist info
 const logger = require('../../utils/logger'); // Adjust path
 const config = require('../../config'); // Adjust path
-const { getUserSpotifyApi } = require('../../spotify/spotifyAuth'); // Adjust path
-const { replyWithError, replyWithSuccess } = require('../../utils/interactionUtils'); // Use helpers
+// Import Lavalink player function and queue functions
+const { getLavalinkPlayer, createGuildQueue, addToQueue, playNextTrack, updateNowPlayingMessage } = require('../../spotify/spotifyPlayer'); // Adjust path
+// play-dl is no longer needed here
+// const play = require('play-dl');
+// Spotify API might still be useful for metadata if Lavalink fails on Spotify URLs
+const { getClientCredentialsSpotifyApi } = require('../../spotify/spotifyAuth'); // Adjust path
+
+// Helper function to format duration from ms to MM:SS
+function formatDuration(ms) {
+    if (!ms || typeof ms !== 'number' || ms < 0) return 'N/A';
+    const totalSeconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
 
 module.exports = {
     data: new SlashCommandBuilder()
         .setName('play')
-        .setDescription('Plays a song or playlist from Spotify.')
+        .setDescription('Plays a song or playlist from URL or search query using Lavalink.') // Updated description
         .addStringOption(option =>
             option.setName('query')
-                .setDescription('Spotify track or playlist URL') // Updated description
+                .setDescription('Song name, search term, or URL (YouTube, SoundCloud, Spotify etc.)') // Updated description
                 .setRequired(true)),
 
     async execute(interaction, client, userProfile) {
+        logger.info(`====== Executing /play command for query: "${interaction.options.getString('query')}" ======`);
         await interaction.deferReply();
 
         const query = interaction.options.getString('query');
@@ -24,164 +36,129 @@ module.exports = {
         const guildId = interaction.guild.id;
 
         // --- Pre-checks ---
-        if (!voiceChannel) {
-            return interaction.editReply({ content: 'You need to be in a voice channel to summon me for music!', ephemeral: true });
-        }
+        if (!voiceChannel) return interaction.editReply({ content: 'You need to be in a voice channel...', flags: 64 });
         const permissions = voiceChannel.permissionsFor(client.user);
-        if (!permissions || !permissions.has(PermissionFlagsBits.Connect) || !permissions.has(PermissionFlagsBits.Speak)) {
-            return interaction.editReply({ content: 'I require the ancient rites (permissions) to join and speak in your voice channel!', ephemeral: true });
+        if (!permissions || !permissions.has('Connect') || !permissions.has('Speak')) return interaction.editReply({ content: 'I require permissions...', flags: 64 });
+
+        // --- Get Lavalink Player (ensure connection) ---
+        const player = await getLavalinkPlayer(client, guildId, voiceChannel.id, interaction.channel);
+        if (!player) {
+            return interaction.editReply({ content: 'Failed to connect to voice or Lavalink node. Please try again.', flags: 64 });
         }
-        if (!query) {
-             return interaction.editReply({ content: 'Pray tell, what Spotify melody shall I procure? Please provide a track or playlist URL.', ephemeral: true });
-        }
+        // Ensure queue structure exists
+        let queue = client.queues?.get(guildId);
+        if (!queue) queue = createGuildQueue(interaction, voiceChannel);
+        queue.lavalinkPlayer = player; // Ensure player is linked
 
-        let queue = client.queues.get(guildId);
-        const botCurrentVC = interaction.guild.members.me?.voice?.channel;
-
-        // --- Handle Bot/User VC State ---
-        if (botCurrentVC && botCurrentVC.id !== voiceChannel.id) {
-            return interaction.editReply({ content: `I am currently bound to another channel (${botCurrentVC.name}). Please join me there or stop the current playback first.`, ephemeral: true });
-        }
-
-        // --- Create or Update Queue ---
-        if (!queue) {
-            queue = createGuildQueue(interaction, voiceChannel);
-            client.queues.set(guildId, queue);
-            logger.info(`Created new queue for guild ${guildId}`);
-        } else {
-            queue.textChannel = interaction.channel;
-            queue.voiceChannel = voiceChannel;
-            logger.debug(`Updated channel references for existing queue in guild ${guildId}`);
-        }
-
-
-        // --- Process Spotify Input ---
         try {
-            let songs = [];
+            // --- Step 1: Load Tracks using Lavalink ---
+            logger.info(`[${guildId}] Loading tracks via Lavalink for: "${query}"`);
+            // Use node attached to the player to load tracks
+            // Prepend search type if it's not a URL and default to YouTube search
+            const searchQuery = query.startsWith('http') ? query : `ytsearch:${query}`;
+            const searchResult = await player.node.rest.loadTracks(searchQuery);
+
+            // --- Step 2: Handle Lavalink Load Results ---
+            let tracksToAdd = [];
             let playlistInfo = null;
-            let inputSource = 'Spotify'; // Assume Spotify input
 
-            // Validate the query type using play-dl, focusing on Spotify
-            const validation = await play.validate(query).catch(() => 'invalid'); // Treat validation errors as invalid input
-            logger.debug(`Validation result for query "${query}": ${validation}`);
-
-            // Get Spotify API instance if needed (mainly for private playlists)
-            // const spotifyApi = validation?.startsWith('sp_') ? await getUserSpotifyApi(interaction.user.id) : null;
-            // Note: getUserSpotifyApi might be needed if play.playlist_info fails on private lists
-
-            if (validation === 'sp_track') {
-                const trackInfo = await play.video_info(query); // play-dl uses this to get metadata
-                if (!trackInfo) throw new Error(`Could not find track information for the provided Spotify track URL.`);
-                const song = {
-                    title: trackInfo.video_details.title || 'Untitled Track',
-                    url: trackInfo.video_details.url, // This might be the Spotify URL, play-dl handles finding stream source later
-                    duration: trackInfo.video_details.durationRaw,
-                    thumbnail: trackInfo.video_details.thumbnails?.[0]?.url,
-                    requestedBy: interaction.user.tag,
-                    source: inputSource,
-                };
-                songs.push(song);
-
-            } else if (validation === 'sp_playlist') {
-                const playlist = await play.playlist_info(query, { incomplete: true });
-                if (!playlist) throw new Error(`Could not find playlist information for the provided Spotify playlist URL.`);
-
-                await interaction.editReply({ content: `Fetching tracks from Spotify playlist: **${playlist.title || 'Untitled Playlist'}**... (This might take a moment)` });
-
-                await playlist.fetch(); // Fetch all tracks
-
+            if (searchResult.loadType === 'LOAD_FAILED') {
+                logger.error(`[${guildId}] Lavalink load failed for "${searchQuery}". Reason: ${searchResult.exception?.message || 'Unknown'}`);
+                return interaction.editReply({ content: `Error loading track(s): ${searchResult.exception?.message || 'Could not load track'}` });
+            } else if (searchResult.loadType === 'NO_MATCHES') {
+                logger.warn(`[${guildId}] Lavalink found no matches for "${searchQuery}".`);
+                return interaction.editReply({ content: `Could not find any tracks matching "${query}".` });
+            } else if (searchResult.loadType === 'TRACK_LOADED') {
+                tracksToAdd.push(searchResult.data);
+                logger.debug(`[${guildId}] Lavalink loaded single track: ${searchResult.data.info.title}`);
+            } else if (searchResult.loadType === 'PLAYLIST_LOADED') {
+                tracksToAdd = searchResult.data.tracks;
                 playlistInfo = {
-                    title: playlist.title || 'Untitled Playlist',
-                    url: playlist.url,
-                    thumbnail: playlist.thumbnail?.url,
+                    name: searchResult.data.info.name,
+                    count: tracksToAdd.length,
+                };
+                logger.debug(`[${guildId}] Lavalink loaded playlist "${playlistInfo.name}" with ${playlistInfo.count} tracks.`);
+                // Optionally edit reply to indicate playlist loading
+                await interaction.editReply({ content: `Adding ${playlistInfo.count} tracks from playlist "${playlistInfo.name}"...`}).catch(()=>{});
+            } else if (searchResult.loadType === 'SEARCH_RESULT') {
+                // If it's a search result, ideally we'd let the user pick like in /search
+                // For /play, we'll just take the first result for simplicity
+                if (searchResult.data.length === 0) {
+                     return interaction.editReply({ content: `Could not find any tracks matching "${query}".` });
+                }
+                tracksToAdd.push(searchResult.data[0]);
+                logger.debug(`[${guildId}] Lavalink search found tracks. Taking first result: ${tracksToAdd[0].info.title}`);
+            }
+
+            if (tracksToAdd.length === 0) {
+                 return interaction.editReply({ content: `No tracks were found or loaded for your query.` });
+            }
+
+            // --- Step 3: Add Tracks to Bot Queue ---
+            let actuallyAddedCount = 0;
+            for (const trackData of tracksToAdd) {
+                const song = {
+                    title: trackData.info.title || 'Untitled Track',
+                    url: trackData.info.uri,
+                    duration: formatDuration(trackData.info.length),
+                    rawDurationMs: trackData.info.length,
+                    thumbnail: trackData.info.artworkUrl, // Use artworkUrl if available
                     requestedBy: interaction.user.tag,
-                    source: inputSource,
-                    initialCount: playlist.total_videos,
-                    addedCount: 0,
+                    source: trackData.info.sourceName || 'Lavalink',
+                    lavalinkTrack: trackData.track, // Store the Lavalink track identifier
                 };
 
-                for (const track of playlist.videos) {
-                     if (queue.songs.length + playlistInfo.addedCount >= config.music.maxQueueSize) {
-                         logger.warn(`Queue full while adding Spotify playlist ${playlist.title}. Stopping.`);
-                         break;
-                     }
-                     if (track && track.title && track.url) {
-                        const song = {
-                            title: track.title,
-                            url: track.url, // Keep Spotify URL, play-dl resolves stream later
-                            duration: track.durationRaw,
-                            thumbnail: track.thumbnails?.[0]?.url,
-                            requestedBy: interaction.user.tag,
-                            source: inputSource,
-                        };
-                        // Skip duplicates (optional checks remain)
-                        if (!config.music.allowPlaylistDuplicates && (songs.some(s => s.url === song.url) || queue.songs.some(s => s.url === song.url))) continue;
+                // Add to queue (addToQueue handles duplicates/size limit)
+                const { addedCount } = await addToQueue(interaction, client.queues, song);
+                actuallyAddedCount += addedCount;
 
-                        songs.push(song);
-                        playlistInfo.addedCount++;
-                     }
-                }
-
-            } else { // Input is not a valid Spotify track or playlist URL
-                 logger.warn(`Invalid input for /play command: "${query}". Validation: ${validation}`);
-                 return interaction.editReply({ content: `Invalid input. Please provide a valid Spotify track or playlist URL.` });
-            }
-
-            // --- Handle Results ---
-            if (songs.length === 0) {
-                 if (playlistInfo) {
-                     return interaction.editReply({ content: `No new tracks were added from the playlist "${playlistInfo.title}". They might already be in the queue or duplicates.` });
+                // Stop adding if queue becomes full
+                 if (queue.songs.length >= (config.music.maxQueueSize || 100) && addedCount === 0) {
+                     logger.warn(`[${guildId}] Queue full during /play add. Added ${actuallyAddedCount} tracks.`);
+                     break;
                  }
-                 // This case should ideally be caught by the track fetch error above
-                 return interaction.editReply({ content: `Could not process the provided Spotify link.` });
             }
 
-            // Add the found songs to the actual queue
-            const { addedCount, totalSongsInQueue } = await addToQueue(interaction, client.queues, songs);
+            if (actuallyAddedCount === 0) {
+                 // Handle cases where tracks were found but not added (e.g., all duplicates)
+                 return interaction.editReply({ content: `Found track(s), but none were added (they might be duplicates or the queue is full).` });
+            }
 
-            // Build confirmation embed
+            // --- Step 4: Send Confirmation ---
             const embed = new EmbedBuilder().setColor(config.colors.success);
             if (playlistInfo) {
-                embed.setTitle(`Playlist Added: ${playlistInfo.title}`)
-                     .setURL(playlistInfo.url)
-                     .setDescription(`Added **${playlistInfo.addedCount}** track(s) from ${playlistInfo.source} to the queue.`)
-                     .setThumbnail(playlistInfo.thumbnail)
-                     .setFooter({ text: `Requested by ${playlistInfo.requestedBy}` });
-                 if (totalSongsInQueue >= config.music.maxQueueSize && playlistInfo.addedCount < playlistInfo.initialCount) {
-                     embed.description += `\n*Queue is now full (${config.music.maxQueueSize} songs). Not all tracks from the playlist could be added.*`;
-                 } else if (playlistInfo.addedCount < songs.length) {
-                      embed.description += `\n*Some tracks were skipped (duplicates).*`;
+                embed.setTitle(`Playlist Added: ${playlistInfo.name}`)
+                     .setDescription(`Added **${actuallyAddedCount}** track(s) to the queue.`)
+                     // .setThumbnail(playlistInfo.thumbnail) // Lavalink playlist load doesn't usually provide thumbnail
+                     .setFooter({ text: `Requested by ${interaction.user.tag}` });
+                 if (actuallyAddedCount < playlistInfo.count) {
+                     embed.description += `\n*Some tracks may have been skipped (duplicates or queue full).*`;
                  }
             } else { // Single track added
-                const addedSong = songs[0];
+                const addedSong = queue.songs[queue.songs.length - 1]; // Get the last added song
                 embed.setTitle(`Track Added: ${addedSong.title}`)
                      .setURL(addedSong.url)
-                     .setDescription(`Added from ${addedSong.source}. Position in queue: **${totalSongsInQueue}**`)
+                     .setDescription(`Added from ${addedSong.source}.\nPosition in queue: **${queue.songs.length}**`)
                      .setThumbnail(addedSong.thumbnail)
                      .addFields({ name: 'Duration', value: addedSong.duration || 'N/A', inline: true })
                      .setFooter({ text: `Requested by ${addedSong.requestedBy}` });
             }
+            await interaction.editReply({ embeds: [embed], content: '' });
 
-            await interaction.editReply({ embeds: [embed], content: '' }); // Clear "Fetching..." content
 
-            // --- Start Playback if not already playing ---
-            const botVC = interaction.guild.members.me?.voice?.channel;
-            if (!queue.playing && !botVC) {
-                logger.info(`Starting playback as queue was not playing and bot was not in VC.`);
-                await startPlayback(interaction, client.queues, queue);
-            } else if (!queue.playing && botVC) {
-                 logger.info(`Triggering playNextTrack as queue was not playing but bot was in VC.`);
-                 playNextTrack(guildId, client.queues);
-            } else if (queue.playing) {
-                logger.debug(`Queue is already playing, updating Now Playing message.`);
-                await updateNowPlayingMessage(queue);
+            // --- Step 5: Start Playback if Needed ---
+            if (!player.playing && !player.paused) {
+                 logger.info(`[${guildId}] Player not playing, starting playback after /play.`);
+                 await playNextTrack(guildId, client.queues, client);
+            } else {
+                 // If already playing, update NP message queue count potentially
+                 await updateNowPlayingMessage(queue);
             }
 
-
         } catch (error) {
-            logger.error(`Error processing play command for query "${query}" in guild ${guildId}:`, error);
-            // Use helper or direct editReply for error feedback
-            await interaction.editReply({ content: `An error occurred while processing the Spotify link: ${error.message || 'Could not process your request.'}`, embeds: [], ephemeral: true });
+             logger.error(`[${guildId}] Error during Lavalink /play command:`, error);
+             // Use editReply since we deferred
+             await interaction.editReply({ content: `An error occurred while processing your request: ${error.message || 'Unknown error'}`, embeds: [] });
         }
     },
 };

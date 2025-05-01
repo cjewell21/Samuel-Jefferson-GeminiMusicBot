@@ -1,0 +1,121 @@
+server: # REST and WS server
+  port: 4848
+  address: 127.0.0.1
+lavalink:
+  server:
+    password: "youshallnotpass"
+    sources:
+      youtube: false
+      bandcamp: false
+      soundcloud: true
+      twitch: false
+      vimeo: true
+      http: false
+      local: false
+    filters: # All filters are enabled by default
+      volume: true
+      equalizer: true
+      karaoke: true
+      timescale: true
+      tremolo: true
+      vibrato: true
+      distortion: true
+      rotation: true
+      channelMix: true
+      lowPass: true
+    bufferDurationMs: 400 # The duration of the NAS buffer. Higher values fare better against longer GC pauses
+    frameBufferDurationMs: 5000 # How many milliseconds of audio to keep buffered
+    youtubePlaylistLoadLimit: 3 # Number of pages at 100 each
+    opusEncodingQuality: 5 # Opus encoder quality. Valid values range from 0 to 10, where 10 is best quality but is the most expensive on the CPU.
+    resamplingQuality: LOW # Quality of resampling operations. Valid values are LOW, MEDIUM and HIGH, where HIGH uses the most CPU.
+    trackStuckThresholdMs: 10000 # The threshold for how long a track can be stuck. A track is stuck if does not return any audio data.
+    playerUpdateInterval: 5 # How frequently to send player updates to clients, in seconds
+    useSeekGhosting: true # Seek ghosting is the effect where whilst a seek is in progress, the audio buffer is read from until empty, or until seek is ready.
+    youtubeSearchEnabled: true
+    soundcloudSearchEnabled: true
+    gc-warnings: true
+  plugins:
+    - dependency: "com.github.topi314.lavasrc:lavasrc-plugin:4.6.0" # adds support for spotify, deezer, yandexmusic, applemusic
+      repository: "https://maven.topi.wtf/releases"
+    - dependency: "com.github.topi314.lavasearch:lavasearch-plugin:1.0.0" # adds support for filtered searches
+      repository: "https://maven.topi.wtf/releases"
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.13.0" # adds support for YouTube
+      snapshot: false # Set to true if you want to use a snapshot version.
+plugins:
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: true
+    allowDirectPlaylistIds: true
+    clients:
+      - MUSIC
+      - ANDROID_VR
+      - WEB
+      - WEBEMBEDDED
+  lavasrc:
+    providers:
+      - "spsearch:%QUERY%" # Prioritize Spotify search
+      - "ytsearch:%QUERY%" # Fallback to YouTube
+      - "dzisrc:%ISRC%"
+      - "ytsearch:\"%ISRC%\""
+      - "dzsearch:%QUERY%"
+      - "ytmsearch:%QUERY%"
+      - "scsearch:%QUERY%"
+    sources:
+      spotify: true
+      applemusic: false
+      deezer: false
+      yandexmusic: false
+      flowerytts: true
+    spotify:
+      clientId: "3122b399229c41e3ad069453de715bba"
+      clientSecret: "ba7d649b56a34474988082f7dd9935aa"
+      countryCode: "US"
+      playlistLoadLimit: 3
+      albumLoadLimit: 6
+          #applemusic:
+    #  countryCode: "US" 
+    #  mediaAPIToken: "..." # apple music api token
+     # playlistLoadLimit: 1 # The number of pages at 300 tracks each
+     # albumLoadLimit: 1 # The number of pages at 300 tracks each
+    #deezer:
+    #  masterDecryptionKey: "g.............1"
+    #yandexmusic:
+     # accessToken: "...."
+    flowerytts: # Example (correct + working) configuration for flowery-tts
+      voice: "Olivia" # (case-sensitive) get default voice from here https://api.flowery.pw/v1/tts/voices
+      translate: false # whether to translate the text to the native language of voice
+      silence: 0 # the silence parameter is in milliseconds. Range is 0 to 10000. The default is 0.
+      speed: 1.0 # the speed parameter is a float between 0.5 and 10. The default is 1.0. (0.5 is half speed, 2.0 is double speed, etc.)
+      audioFormat: "mp3" # supported formats are: mp3, ogg_opus, ogg_vorbis, aac, wav, and flac. Default format is mp3
+
+metrics:
+  prometheus:
+    enabled: false
+    endpoint: /metrics
+sentry:
+  dsn: ""
+  environment: ""
+youtube:
+  pot:
+    token: "MnSFuSR_kz3KUoWBjaoO97mvoMOr_DPGA7u0nLWjhRHt2cM7ke0oBJvy9-EIPJWMlY_IAho3AuXT0NXbHkgJfQz6Sa14iyWZKrGGLHMHBuNIZ5HpjM6H95cO6RR_dmvU5TibxfxZj9rkiz3EunkfeuKOJEqiAg=="
+    visitorData: "CgtWc0h4NmJIQ09iNCj9zLPABjIKCgJVUxIEGgAgPw%3D%3D"
+logging:
+  file:
+    max-history: 10
+    max-size: 10MB
+  path: ./logs/
+  level:
+    root: INFO
+    lavalink: INFO
+  request:
+    enabled: true
+    includeClientInfo: true
+    includeHeaders: true
+    includeQueryString: true
+    includePayload: true
+    maxPayloadLength: 10000
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 10

@@ -41,7 +41,7 @@ module.exports = {
 
         if (!userProfile) {
              // Should be handled by interactionCreate, but double-check
-             return interaction.reply({ content: 'Could not retrieve your user profile. Please try again.', ephemeral: true });
+             return interaction.reply({ content: 'Could not retrieve your user profile. Please try again.', flags: [4096] });
         }
 
         if (subcommand === 'view') {
@@ -55,7 +55,7 @@ module.exports = {
                     // Add more fields for other settings
                 )
                 .setTimestamp();
-            await interaction.reply({ embeds: [embed], ephemeral: true });
+            await interaction.reply({ embeds: [embed], flags: [4096] });
 
         } else if (subcommand === 'set') {
             let changesMade = false;
@@ -81,7 +81,7 @@ module.exports = {
                      updatedFields.push(`AI Personality: **${personalityValue.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}**`);
                      logger.info(`User ${interaction.user.tag} set ai_personality to ${personalityValue}`);
                  } else {
-                     return interaction.reply({ content: `Invalid AI personality choice: "${personalityValue}". Please choose from the available options.`, ephemeral: true });
+                     return interaction.reply({ content: `Invalid AI personality choice: "${personalityValue}". Please choose from the available options.`, flags: [4096] });
                  }
             }
 
@@ -89,7 +89,7 @@ module.exports = {
 
 
             if (!changesMade) {
-                return interaction.reply({ content: 'You did not specify any settings to change. Use `/settings set [option]:[value]` or view current settings with `/settings view`.', ephemeral: true });
+                return interaction.reply({ content: 'You did not specify any settings to change. Use `/settings set [option]:[value]` or view current settings with `/settings view`.', flags: [4096] });
             }
 
             try {
@@ -99,10 +99,10 @@ module.exports = {
                     .setTitle('Settings Updated')
                     .setDescription(`Your preferences have been updated:\n- ${updatedFields.join('\n- ')}`)
                     .setTimestamp();
-                await interaction.reply({ embeds: [embed], ephemeral: true });
+                await interaction.reply({ embeds: [embed], flags: [4096] });
             } catch (error) {
                 logger.error(`Failed to save user settings for ${interaction.user.tag}:`, error);
-                await interaction.reply({ content: 'An error occurred while saving your settings. Please try again.', ephemeral: true });
+                await interaction.reply({ content: 'An error occurred while saving your settings. Please try again.', flags: [4096] });
             }
         }
     },

@@ -21,6 +21,7 @@ module.exports = {
         spotify: 0x1DB954,    // Spotify Green (as number)
         gemini: 0x4285F4,     // Google Blue (approx, as number)
         music: 0xFF007F,      // Music Pink/Magenta (as number) - Ensure this is a valid number
+        info: 0x0099FF,
         // Alternatively use hex strings:
         // primary: '#5865F2',
         // success: '#57F287',
